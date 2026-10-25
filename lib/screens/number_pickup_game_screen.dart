@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flame/game.dart';
@@ -401,31 +402,49 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
   Future<void> _onNpcQuestion(NpcQuestion question) async {
     if (!mounted || levelCompleted || _completionPending || _isLeaving) return;
     final activeGame = gameInstance;
+    var activeQuestion = question;
     bool? isCorrect;
-    final attemptIds = GameModeAnswerAttemptIds(
-      createId: UserProgressService.newGameModeAnswerAttemptId,
-    );
     try {
-      isCorrect = await showDialog<bool>(
-        context: context,
-        builder: (_) => NpcQuestionDialog(
-          question: question,
-          onAnswerSelected: (selectedAnswer, answerIsCorrect) {
-            final scoreEarned = answerIsCorrect ? 10 : 0;
-            return UserProgressService.recordGameModeAnswer(
-              attemptId: attemptIds.forAnswer(selectedAnswer, answerIsCorrect),
-              level: currentLevel,
-              questionNumber: question.questionNumber,
-              question: question.prompt,
-              selectedAnswer: selectedAnswer,
-              correctAnswer: question.choices[question.correctAnswerIndex],
-              isCorrect: answerIsCorrect,
-              scoreEarned: scoreEarned,
-              scoreAfter: score + scoreEarned,
-            );
-          },
-        ),
-      );
+      while (mounted) {
+        final attemptIds = GameModeAnswerAttemptIds(
+          createId: UserProgressService.newGameModeAnswerAttemptId,
+        );
+        isCorrect = await showDialog<bool>(
+          context: context,
+          builder: (_) => NpcQuestionDialog(
+            question: activeQuestion,
+            onAnswerSelected: (selectedAnswer, answerIsCorrect) {
+              final scoreEarned = answerIsCorrect ? 10 : 0;
+              return UserProgressService.recordGameModeAnswer(
+                attemptId:
+                    attemptIds.forAnswer(selectedAnswer, answerIsCorrect),
+                level: currentLevel,
+                questionNumber: activeQuestion.questionNumber,
+                question: activeQuestion.prompt,
+                selectedAnswer: selectedAnswer,
+                correctAnswer:
+                    activeQuestion.choices[activeQuestion.correctAnswerIndex],
+                isCorrect: answerIsCorrect,
+                scoreEarned: scoreEarned,
+                scoreAfter: score + scoreEarned,
+              );
+            },
+          ),
+        );
+        if (isCorrect != false) break;
+
+        await _handleDamage(
+          'Wrong answer. You lost 1 heart. {health} remaining. Try again.',
+        );
+        if (!mounted ||
+            health <= 0 ||
+            activeGame != gameInstance ||
+            levelCompleted ||
+            _completionPending ||
+            _isLeaving) {
+          return;
+        }
+      }
     } finally {
       activeGame.closeNpcQuestion();
     }
@@ -435,9 +454,21 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
     if (isCorrect) {
       final bool saved;
       try {
-        saved = await activeGame.completeNpcQuestion(question.questionNumber);
+        saved = await activeGame.completeNpcQuestion(
+          question.questionNumber,
+          awardLeaderboardPoints: true,
+        );
       } catch (error, stackTrace) {
-        debugPrint('Unable to save NPC question progress: $error');
+        if (error is FirebaseException) {
+          debugPrint(
+            'NPC progress save failed (${error.plugin}/${error.code}): '
+            '${error.message ?? 'No Firebase error message was provided.'}',
+          );
+        } else {
+          debugPrint(
+            'NPC progress save failed (${error.runtimeType}): $error',
+          );
+        }
         debugPrintStack(stackTrace: stackTrace);
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -482,7 +513,7 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Question ${question.questionNumber} complete! '
+            'Question ${activeQuestion.questionNumber} complete! '
             'Question ${activeGame.currentQuestionNumber} unlocked.',
           ),
           duration: const Duration(seconds: 2),
@@ -490,10 +521,6 @@ class _NumberPickupGameScreenState extends State<NumberPickupGameScreen> {
       );
       return;
     }
-
-    await _handleDamage(
-      'Wrong answer. You lost 1 heart. {health} remaining. Try again.',
-    );
   }
 
   Future<void> _showLevelClearedDialog(

@@ -109,16 +109,36 @@ class _GameScreenState extends State<GameScreen> {
   Future<void> _onNpcQuestion(NpcQuestion question) async {
     final activeGame = _game;
     bool? isCorrect;
+    var activeQuestion = question;
+    var hadIncorrectAnswer = false;
     try {
-      isCorrect = await showDialog<bool>(
-        context: context,
-        builder: (_) => NpcQuestionDialog(question: question),
-      );
+      while (mounted) {
+        isCorrect = await showDialog<bool>(
+          context: context,
+          builder: (_) => NpcQuestionDialog(question: activeQuestion),
+        );
+        if (isCorrect != false) break;
+
+        hadIncorrectAnswer = true;
+        activeQuestion =
+            activeGame.nextNpcQuestionAfterIncorrect(question.questionNumber);
+      }
     } finally {
       activeGame.closeNpcQuestion();
     }
 
-    if (!mounted || isCorrect == null) return;
+    if (!mounted) return;
+    if (isCorrect == null) {
+      if (hadIncorrectAnswer) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Not quite. Try again when you return.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
 
     if (isCorrect) {
       try {
@@ -147,12 +167,10 @@ class _GameScreenState extends State<GameScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          isCorrect
-              ? activeGame.allNpcQuestionsCompleted
-                  ? 'All six NPC questions are complete.'
-                  : 'Question ${question.questionNumber} complete! '
-                      'Question ${activeGame.currentQuestionNumber} unlocked.'
-              : 'Not quite. Try again when you return.',
+          activeGame.allNpcQuestionsCompleted
+              ? 'All six NPC questions are complete.'
+              : 'Question ${activeQuestion.questionNumber} complete! '
+                  'Question ${activeGame.currentQuestionNumber} unlocked.',
         ),
         duration: const Duration(seconds: 2),
       ),

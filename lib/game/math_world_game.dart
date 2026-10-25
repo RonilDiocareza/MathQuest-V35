@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import 'dart:ui' as ui;
 
@@ -6,6 +7,7 @@ import 'package:flame/components.dart';
 import 'package:flame/events.dart';
 import 'package:flame/experimental.dart' as flame;
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/auth_service.dart';
 import '../services/user_progress_service.dart';
@@ -50,6 +52,9 @@ class MathWorldGame extends FlameGame
   late bool isSmallDevice;
   int currentQuestionNumber = 1;
   bool allNpcQuestionsCompleted = false;
+  final NpcQuestionCycle _npcQuestionCycle = NpcQuestionCycle();
+  final Map<int, List<NpcQuestion>> _npcQuestionPools = {};
+  final Map<int, NpcQuestion> _currentNpcQuestions = {};
   VoidCallback? onNumberCollected;
   VoidCallback? onWrongNumberCollected;
   ValueChanged<NpcQuestion>? onNpcQuestion;
@@ -442,6 +447,7 @@ class MathWorldGame extends FlameGame
             'No question is configured for NPC "${placement.questionId}".',
           );
         }
+        _questionPoolForNpc(question);
         final npc = QuestionNpc(
           question: question,
           spriteAssetPath: placement.spriteAssetPath,
@@ -458,6 +464,7 @@ class MathWorldGame extends FlameGame
         questionNpcs.add(npc);
         world.add(npc);
       }
+      await _loadNpcQuestionHistory();
       await Future.wait(questionNpcs.map((npc) => npc.loaded));
       debugPrint('Game initialization: ${questionNpcs.length} NPCs loaded.');
       if (nextUnansweredNpcPlacement != null && !allNpcQuestionsCompleted) {
@@ -544,10 +551,100 @@ class MathWorldGame extends FlameGame
       onNpcQuestionLocked?.call(currentQuestionNumber);
       return;
     }
-    openNpcQuestion(question);
+    openNpcQuestion(questionForNpc(question));
   }
 
-  Future<bool> completeNpcQuestion(int questionNumber) async {
+  NpcQuestion questionForNpc(NpcQuestion originalQuestion) {
+    return _currentNpcQuestions.putIfAbsent(
+      originalQuestion.questionNumber,
+      () => _nextQuestionForNpc(originalQuestion),
+    );
+  }
+
+  List<NpcQuestion> _questionPoolForNpc(NpcQuestion originalQuestion) {
+    return _npcQuestionPools.putIfAbsent(originalQuestion.questionNumber, () {
+      final extras = NpcQuestion.extraQuestionsForLevel(
+        originalQuestion.questionNumber,
+        level,
+      )..shuffle(Random());
+      return [originalQuestion, ...extras];
+    });
+  }
+
+  NpcQuestion _nextQuestionForNpc(NpcQuestion originalQuestion) {
+    final question = _npcQuestionCycle.nextForNpc(
+      _questionPoolForNpc(originalQuestion),
+    );
+    _saveNpcQuestionHistory(originalQuestion.questionNumber);
+    return question;
+  }
+
+  NpcQuestion nextNpcQuestionAfterIncorrect(int questionNumber) {
+    final pool = _npcQuestionPools[questionNumber];
+    if (pool == null) {
+      throw StateError(
+        'NPC $questionNumber has no active question cycle to advance.',
+      );
+    }
+    final question = _npcQuestionCycle.nextForNpc(pool);
+    _currentNpcQuestions[questionNumber] = question;
+    _saveNpcQuestionHistory(questionNumber);
+    return question;
+  }
+
+  String _npcQuestionHistoryKey(int npcNumber) {
+    final userId = AuthService.currentUser?.uid ?? 'guest';
+    return 'mathquest.npc-question-history.v1.$userId.$level.$npcNumber';
+  }
+
+  Future<void> _loadNpcQuestionHistory() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      for (final entry in _npcQuestionPools.entries) {
+        final questionIds =
+            preferences.getStringList(_npcQuestionHistoryKey(entry.key)) ??
+                const <String>[];
+        _npcQuestionCycle.restoreShownQuestionIds(
+          entry.key,
+          questionIds,
+          validQuestionIds: entry.value.map((question) => question.id).toSet(),
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('Unable to load NPC question history: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
+
+  void _saveNpcQuestionHistory(int npcNumber) {
+    final questionIds =
+        _npcQuestionCycle.shownQuestionIdsForNpc(npcNumber).toList();
+    unawaited(_writeNpcQuestionHistory(npcNumber, questionIds));
+  }
+
+  Future<void> _writeNpcQuestionHistory(
+    int npcNumber,
+    List<String> questionIds,
+  ) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final saved = await preferences.setStringList(
+        _npcQuestionHistoryKey(npcNumber),
+        questionIds,
+      );
+      if (!saved) {
+        throw StateError('Local storage rejected NPC question history.');
+      }
+    } catch (error, stackTrace) {
+      debugPrint('Unable to save NPC question history: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
+
+  Future<bool> completeNpcQuestion(
+    int questionNumber, {
+    bool awardLeaderboardPoints = false,
+  }) async {
     if (!isGameLoaded ||
         allNpcQuestionsCompleted ||
         questionNumber != currentQuestionNumber ||
@@ -560,6 +657,7 @@ class MathWorldGame extends FlameGame
       questionNumber,
       uid: uid,
       level: level,
+      awardLeaderboardPoints: awardLeaderboardPoints,
     );
     if (!saved) {
       await _loadNpcQuestionProgress();

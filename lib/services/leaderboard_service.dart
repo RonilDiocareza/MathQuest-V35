@@ -262,13 +262,41 @@ class LeaderboardService {
       }
 
       final leaderboardSnapshot = await transaction.get(leaderboardRef);
-      if (leaderboardSnapshot.exists) return;
+      final displayName = (userData['name'] ?? 'Player').toString();
+      final profileCreatedAt = userData['createdAt'];
+      final createdAt = profileCreatedAt ?? FieldValue.serverTimestamp();
+      if (leaderboardSnapshot.exists) {
+        final existingData = leaderboardSnapshot.data();
+        if (existingData == null) {
+          throw StateError('Leaderboard entry data is empty.');
+        }
+
+        final updates = <String, dynamic>{};
+        if (existingData['uid'] != user.uid) {
+          updates['uid'] = user.uid;
+        }
+        if (existingData['displayName'] != displayName) {
+          updates['displayName'] = displayName;
+        }
+        if (existingData['createdAt'] != profileCreatedAt &&
+            profileCreatedAt != null) {
+          updates['createdAt'] = profileCreatedAt;
+        } else if (existingData['createdAt'] is! Timestamp &&
+            profileCreatedAt == null) {
+          updates['createdAt'] = FieldValue.serverTimestamp();
+        }
+        if (updates.isNotEmpty) {
+          updates['updatedAt'] = FieldValue.serverTimestamp();
+          transaction.update(leaderboardRef, updates);
+        }
+        return;
+      }
 
       transaction.set(leaderboardRef, {
         'uid': user.uid,
-        'displayName': (userData['name'] ?? 'Player').toString(),
+        'displayName': displayName,
         'totalScore': 0,
-        'createdAt': userData['createdAt'] ?? FieldValue.serverTimestamp(),
+        'createdAt': createdAt,
         'updatedAt': FieldValue.serverTimestamp(),
       });
     });

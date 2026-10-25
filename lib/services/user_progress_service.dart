@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'leaderboard_service.dart';
 import '../worksheet_lesson_data.dart';
 
 class UserProgress {
@@ -988,7 +989,11 @@ class UserProgressService {
       throw ArgumentError.value(score, 'score');
     }
 
+    await LeaderboardService.ensureCurrentEntry();
     final userRef = _users.doc(_uid());
+    final leaderboardRef = FirebaseFirestore.instance
+        .collection(LeaderboardService.collectionName)
+        .doc(_uid());
     await FirebaseFirestore.instance.runTransaction<void>((transaction) async {
       final snapshot = await transaction.get(userRef);
       if (!snapshot.exists) {
@@ -1003,6 +1008,17 @@ class UserProgressService {
         }
         return;
       }
+
+      final leaderboardSnapshot = await transaction.get(leaderboardRef);
+      final leaderboardData = leaderboardSnapshot.data();
+      if (leaderboardData == null) {
+        throw StateError(
+            'Leaderboard entry not found for the current student.');
+      }
+      final oldLeaderboardScore = _leaderboardScore(leaderboardData);
+      final npcPoints =
+          progress.completedNpcQuestionsForLevel(level).length * 10;
+      final completionPoints = max(0, score - npcPoints);
 
       final completed = {...progress.completedLevels, level}.toList()..sort();
       final mainLevel = ((level - 1) ~/ 20) + 1;
@@ -1030,6 +1046,15 @@ class UserProgressService {
         },
         'progress.latestCompletedGameModeLevel': level.toString(),
       });
+      if (completionPoints > 0) {
+        transaction.update(leaderboardRef, {
+          'uid': _uid(),
+          'displayName': (snapshot.data()?['name'] ?? 'Player').toString(),
+          'totalScore': oldLeaderboardScore + completionPoints,
+          'createdAt': leaderboardData['createdAt'],
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
     });
     _invalidateCurrentProgressCache();
   }
@@ -1074,6 +1099,7 @@ class UserProgressService {
     int questionNumber, {
     String? uid,
     int level = 1,
+    bool awardLeaderboardPoints = false,
   }) async {
     if (questionNumber < 1 || questionNumber > UserProgress.npcQuestionCount) {
       throw ArgumentError.value(questionNumber, 'questionNumber');
@@ -1083,12 +1109,31 @@ class UserProgressService {
     }
 
     final userRef = _users.doc(_uid(uid));
+    if (awardLeaderboardPoints) {
+      await LeaderboardService.ensureCurrentEntry();
+    }
+    final leaderboardRef = awardLeaderboardPoints
+        ? FirebaseFirestore.instance
+            .collection(LeaderboardService.collectionName)
+            .doc(_uid(uid))
+        : null;
     return FirebaseFirestore.instance.runTransaction<bool>((transaction) async {
       final snapshot = await transaction.get(userRef);
+      if (!snapshot.exists) {
+        throw StateError('User profile not found.');
+      }
       final progress = _fromData(snapshot.data());
       if (progress.areNpcQuestionsCompletedForLevel(level) ||
           progress.currentNpcQuestionNumberForLevel(level) != questionNumber) {
         return false;
+      }
+
+      final leaderboardSnapshot =
+          leaderboardRef == null ? null : await transaction.get(leaderboardRef);
+      final leaderboardData = leaderboardSnapshot?.data();
+      if (awardLeaderboardPoints && leaderboardData == null) {
+        throw StateError(
+            'Leaderboard entry not found for the current student.');
       }
 
       final completed = {
@@ -1113,11 +1158,27 @@ class UserProgressService {
         {'progress': updatedProgress},
         SetOptions(merge: true),
       );
+      if (leaderboardRef != null && leaderboardData != null) {
+        transaction.update(leaderboardRef, {
+          'uid': _uid(uid),
+          'displayName': (snapshot.data()?['name'] ?? 'Player').toString(),
+          'totalScore': _leaderboardScore(leaderboardData) + 10,
+          'createdAt': leaderboardData['createdAt'],
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
       return true;
     }).then((completed) {
       if (completed) _invalidateCurrentProgressCache();
       return completed;
     });
+  }
+
+  static int _leaderboardScore(Map<String, dynamic> data) {
+    final rawScore = data['totalScore'] ?? data['totalscore'] ?? 0;
+    if (rawScore is int) return rawScore;
+    if (rawScore is num) return rawScore.toInt();
+    return int.tryParse(rawScore.toString()) ?? 0;
   }
 
   static Future<void> resetNpcQuestionsForLevel(
